@@ -5,6 +5,7 @@ in-place-upgrade.ps1
 Author: SCTG Development ( Ronan Le Meillat )
 License: MIT
 Repository: https://github.com/sctg-development/windows-in-place-updater
+Version: 0.2 (2026-02-06)
 ---------------------------------------------
 
 This script provides helper functions to perform in-place upgrades of Windows installations.
@@ -25,10 +26,25 @@ catch {
 # ---------------------------
 # Ensure running elevated
 # ---------------------------
-# This function checks if the script has Administrator privileges. Many actions (writing to HKLM, launching setup with certain switches)
-# require elevation and will fail otherwise. If the script is not elevated, it finds the PowerShell executable that started the script or
-# falls back to 'pwsh'/'powershell' and relaunches the script using Start-Process with -Verb RunAs (which shows the UAC prompt).
-# info: `Get-Process -Id $PID` is a way to find the current process binary path; Start-Process with -Verb RunAs requests elevation.
+<#
+.SYNOPSIS
+Ensures the script is running with Administrator privileges.
+
+.DESCRIPTION
+This function checks if the current PowerShell process has Administrator privileges.
+If not, it relaunches the entire script with elevated privileges using UAC (User Access Control).
+The original working directory is preserved to ensure relative paths work correctly.
+Many operations in this script (registry writes, setup.exe with specific switches) require
+administrator privileges and will fail without elevation.
+
+.OUTPUTS
+None. If elevation is needed, the function relaunches the script elevated and exits the current process.
+If already elevated, the function returns normally.
+
+.NOTES
+This function should be called at the very beginning of the script before any privileged operations.
+It will trigger a UAC prompt on Windows systems when elevation is required.
+#>
 function Assert-Elevated {
     $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
@@ -258,12 +274,20 @@ Microsoft.DesktopAppInstaller_8wekyb3d8bbwe
 # ---------------------------
 # File retrieval functions
 # ---------------------------
-# These helpers centralize downloads, existence checks and integrity verification.
-# Conventions:
-# - All downloaded helper files are stored under the local `files\` directory.
-# - Helper functions are intentionally simple and throw on unexpected conditions; callers should
-#   catch and report errors to the user.
-# - Use Test-Hash to verify SHA256 to protect users from tampered binaries.
+<#
+.SYNOPSIS
+Checks if a helper file exists in the files\ directory.
+
+.DESCRIPTION
+Tests whether a file with the given name exists in the local 'files\' subdirectory.
+This function is used to verify the presence of downloaded helper tools before use.
+
+.PARAMETER File
+The name of the file to check (without path).
+
+.OUTPUTS
+Boolean. Returns $true if the file exists and is a leaf (not a directory), $false otherwise.
+#>
 function Test-FileExistence {
     param (
         [String]$File
@@ -273,6 +297,24 @@ function Test-FileExistence {
     return Test-Path -PathType Leaf -Path "files\$File"
 }
 
+<#
+.SYNOPSIS
+Downloads a remote file to the files\ directory.
+
+.DESCRIPTION
+Attempts to download a file from a given URL and saves it to files\<File>.
+Display console output during download. This function throws on failure; callers
+should catch errors and provide appropriate error messages to the user.
+
+.PARAMETER File
+The destination filename (without path; will be saved to files\$File).
+
+.PARAMETER Url
+The remote URL to download from.
+
+.OUTPUTS
+None. On success, the file is written to files\$File. On failure, throws an error.
+#>
 function Get-RemoteFile {
     param (
         [String]$File,
@@ -285,6 +327,24 @@ function Get-RemoteFile {
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile "files\$File" -ErrorAction Stop
 }
 
+<#
+.SYNOPSIS
+Verifies the SHA256 hash of a file.
+
+.DESCRIPTION
+Computes the SHA256 hash of files\<File> and compares it to the expected hash value.
+Returns a boolean indicating whether the hash matches. This is used to verify the integrity
+of downloaded files and protect against tampering.
+
+.PARAMETER File
+The filename in the files\ directory to verify.
+
+.PARAMETER Hash
+The expected SHA256 hash as a lowercase hex string.
+
+.OUTPUTS
+Boolean. Returns $true if the hash matches, $false otherwise.
+#>
 function Test-Hash {
     param (
         [String]$File,
@@ -302,10 +362,19 @@ function Test-Hash {
 # ----------------------------
 # Function to install aria2c.exe if not present
 # ----------------------------
-# aria2c is used to perform parallel, reliable downloads from the UUP Dump generated aria2 script.
-# This helper is idempotent: if the expected file exists and its hash matches, it returns success immediately.
-# The function creates the `files\` directory if needed, downloads the file, and verifies the SHA256 hash.
-# If the hash check fails, the file is considered suspicious and the function returns failure so callers can abort.
+<#
+.SYNOPSIS
+Ensures aria2c.exe is installed and verified.
+
+.DESCRIPTION
+Checks if aria2c.exe exists in files\ and has the correct SHA256 hash.
+If not present or hash mismatch, downloads it from the configured URL and verifies integrity.
+Aria2c is used for parallel, reliable downloads of UUP file sets from UUP Dump.
+This function is idempotent: if the file exists with correct hash, returns immediately.
+
+.OUTPUTS
+Boolean. Returns $true if aria2c is ready, $false if download or verification failed.
+#>
 function Install-Aria2c {
     if ((Test-FileExistence -File $script:aria2cFile) -and (Test-Hash -File $script:aria2cFile -Hash $script:aria2cHash)) {
         Write-Host -BackgroundColor Black -ForegroundColor Green "Aria2c is ready."
@@ -340,6 +409,20 @@ function Install-Aria2c {
 # ----------------------------
 # Function to install 7zr.exe if not present
 # ----------------------------
+<#
+.SYNOPSIS
+Ensures 7zr.exe is installed and verified.
+
+.DESCRIPTION
+Checks if 7zr.exe exists in files\ and has the correct SHA256 hash.
+If not present or hash mismatch, downloads it from the configured URL and verifies integrity.
+7zr is a command-line utility for extracting and manipulating 7z archives, used to extract
+the UUP converter archive. This function is idempotent: if the file exists with correct hash,
+returns immediately.
+
+.OUTPUTS
+Boolean. Returns $true if 7zr is ready, $false if download or verification failed.
+#>
 function Install-7zr {
     # If the helper already exists and its integrity is verified, short-circuit and return success.
     if ((Test-FileExistence -File $script:7zrFile) -and (Test-Hash -File $script:7zrFile -Hash $script:7zrHash)) {
@@ -376,6 +459,19 @@ function Install-7zr {
 # ----------------------------
 # Function to install UUP Converter WimLib if not present
 # ----------------------------
+<#
+.SYNOPSIS
+Ensures the UUP Converter WimLib archive is installed and verified.
+
+.DESCRIPTION
+Checks if the UUP converter archive (uup-converter-wimlib.7z) exists in files\ and has the correct SHA256 hash.
+If not present or hash mismatch, downloads it from the configured URL and verifies integrity.
+The converter is used to transform downloaded UUP files into a Windows installation ISO.
+This function is idempotent: if the file exists with correct hash, returns immediately.
+
+.OUTPUTS
+Boolean. Returns $true if UUP Converter WimLib is ready, $false if download or verification failed.
+#>
 function Install-UUPConverterWimLib {
     # The UUP converter archive is relatively large; check whether it's already present and valid first.
     if ((Test-FileExistence -File $script:uupConvertWimLibFile) -and (Test-Hash -File $script:uupConvertWimLibFile -Hash $script:uupConvertWimLibHash)) {
@@ -411,16 +507,19 @@ function Install-UUPConverterWimLib {
 #----------------------------
 # Function to expand UUP Converter WimLib using 7zr
 #----------------------------
-# Notes for maintainers:
-# - The converter archive contains a set of helper scripts (convert-UUP.cmd) and tools in a layout
-#   the converter expects (bin\, sources\, etc.). We extract the archive in-place so the converter
-#   can be executed directly from the working directory. If you change the extraction target, be
-#   careful to update Start-UUPDumpISOBuilder to find `convert-UUP.cmd` in the new location.
-# - The archive may include `ConvertConfig.ini` and `CustomAppsList.txt`. Historically these were
-#   excluded in certain workflows; the copy/extract command excludes them by default so users can
-#   provide site-specific versions. See `$script:DefaultConvertConfigIni` and
-#   `$script:DefaultCustomAppsList` for the embedded defaults used when the files are not provided.
-# - 7zr argument ordering matters: use `x <archive> -o<out> -y -x!pattern` style if you need to change options.
+<#
+.SYNOPSIS
+Extracts the UUP Converter WimLib archive.
+
+.DESCRIPTION
+Extracts files from the uup-converter-wimlib.7z archive to the current directory, excluding
+ConvertConfig.ini and CustomAppsList.txt (to allow site-specific versions).
+The converter contains helper scripts and tools needed to transform UUP files into an ISO.
+Must be called after the converter archive has been downloaded and verified.
+
+.OUTPUTS
+Boolean. Returns $true if extraction succeeded, $false if 7zr is unavailable or extraction failed.
+#>
 function Expand-UUPConverterWimLib {
     if (-not (Install-7zr)) { return $false }
     if (-not (Test-FileExistence -File $script:uupConvertWimLibFile)) { Write-Error "UUP Converter WimLib archive not found."; return $false }
@@ -441,8 +540,18 @@ function Expand-UUPConverterWimLib {
 #----------------------------
 # Get JSON list of ids from UUP Dump API
 #----------------------------
-# This function fetches the list of available UUP Dump IDs from the UUP Dump API. It returns the parsed JSON response as a PowerShell object.
-# Note: the API may return an object with a `response` property containing `builds`, or it may return the array directly.
+<#
+.SYNOPSIS
+Retrieves the list of available UUP Dump IDs from the UUP Dump API.
+
+.DESCRIPTION
+Fetches and parses the JSON response from the UUP Dump API listid.php endpoint.
+Returns the list of available UUP builds that can be downloaded and converted to ISO.
+The API response structure may vary; this function handles common shapes gracefully.
+
+.OUTPUTS
+An array of objects containing UUP build information, or $null if the API fails or returns an unexpected format.
+#>
 function Get-UUPDumpIds {
     $url = $script:uupDumpApiUrl + 'listid.php'
     try {
@@ -475,6 +584,20 @@ function Get-UUPDumpIds {
 #----------------------------
 # Filter UUP Dump for returning only titles starting with "Windows 10", "Windows 11" or "Windows Server"
 #----------------------------
+<#
+.SYNOPSIS
+Filters UUP Dump IDs by OS type and architecture.
+
+.DESCRIPTION
+Retrieves all available UUP Dump IDs, then filters them by:
+- Operating system name (keeps only Windows 10, Windows 11, or Windows Server)
+- Architecture (matches the current system architecture)
+- Excludes Insider and Preview builds to avoid unstable pre-releases
+The results are sorted by title for consistent presentation to the user.
+
+.OUTPUTS
+An array of filtered UUP IDs sorted by title, or empty array if none match.
+#>
 function Get-FilteredUUPDumpIds {
     $arch = Get-SystemArchitecture
     $allIds = Get-UUPDumpIds
@@ -503,6 +626,18 @@ function Get-FilteredUUPDumpIds {
 #----------------------------
 # Second level filter to return only id matching the current Windows kind (Client/Server)
 #----------------------------
+<#
+.SYNOPSIS
+Filters UUP Dump IDs by Windows kind (Client vs Server).
+
+.DESCRIPTION
+Takes the already-filtered UUP IDs and further filters them based on the current system's Windows kind.
+If the system is Client, keeps only Windows 10/11 builds. If the system is Server, keeps only Windows Server builds.
+This prevents users from accidentally downloading Server builds on a Client OS.
+
+.OUTPUTS
+An array of filtered UUP IDs matching the system's Windows kind, or empty array if none match.
+#>
 function Get-FilteredUUPDumpIdsByWindowsKind {
     $kind = Get-WindowsKind
     $allFilteredIds = Get-FilteredUUPDumpIds
@@ -522,7 +657,25 @@ function Get-FilteredUUPDumpIdsByWindowsKind {
 }
 
 #----------------------------
-# Function for retieving a list of edition available for a given UUP Dump ID and language
+# Function for retrieving a list of editions available for a given UUP Dump ID and language
+#----------------------------
+<#
+.SYNOPSIS
+Retrieves the list of Windows editions available for a given UUP Dump ID and language.
+
+.DESCRIPTION
+Queries the UUP Dump API to get the available editions (Pro, Home, Enterprise, etc.) for a specific UUP ID
+and language combination. Returns a semicolon-separated string of edition identifiers (e.g., 'pro;home;enterprise').
+
+.PARAMETER uupId
+The UUP Dump ID (uuid) to query.
+
+.PARAMETER languageTag
+The language tag (e.g., 'en-US', 'fr-FR') to use.
+
+.OUTPUTS
+A semicolon-separated string of edition identifiers, or $null if the API fails or returns an unexpected format.
+#>
 function Get-UUPDumpEditions {
     param (
         [string]$uupId,
@@ -562,6 +715,30 @@ function Get-UUPDumpEditions {
 
 #----------------------------
 # Function to download a UUP set and construct an ISO using UUP Dump (download + convert)
+#----------------------------
+<#
+.SYNOPSIS
+Downloads a Windows build from UUP Dump and converts it to a bootable ISO.
+
+.DESCRIPTION
+This is a complex workflow that:
+1. Queries UUP Dump API for available builds
+2. Prompts user to select a build and language
+3. Retrieves the builder configuration file from UUP Dump
+4. Downloads all required files using aria2
+5. Runs the UUP converter to create an installation ISO
+6. Automatically mounts the ISO and makes it available as an installation source
+
+Requires at least 10 GB free disk space. Downloads may take considerable time depending on
+network speed and selected build size.
+
+.OUTPUTS
+None. On success, sets $script:LastCreatedISO to the path of the created ISO file.
+On failure, outputs error messages and returns without creating an ISO.
+
+.NOTES
+This is a long-running operation. The converter displays its own progress output in a separate window.
+#>
 function Start-UUPDumpISOBuilder {
     param()
 
@@ -735,6 +912,19 @@ function Start-UUPDumpISOBuilder {
 
 #----------------------------
 # Function for returning x86, amd64 or arm64 architecture string based on system info
+#----------------------------
+<#
+.SYNOPSIS
+Detects the system architecture.
+
+.DESCRIPTION
+Determines the processor architecture of the running system.
+Returns normalized architecture strings: 'amd64', 'x86', 'arm64', or 'arm'.
+The result is used to filter available UUP Dump builds to compatible architectures.
+
+.OUTPUTS
+String. One of: 'amd64', 'x86', 'arm64', 'arm', or the original system-reported value if not recognized.
+#>
 function Get-SystemArchitecture {
     try {
         # RuntimeInformation::OSArchitecture returns values like X64, X86, Arm, Arm64
@@ -759,8 +949,20 @@ function Get-SystemArchitecture {
 }
 
 #----------------------------
-# Function for returning current Windows kind ether Client or Server
+# Function for returning current Windows kind either Client or Server
 #----------------------------
+<#
+.SYNOPSIS
+Detects the Windows edition kind (Client or Server).
+
+.DESCRIPTION
+Queries the Win32_OperatingSystem WMI class to determine whether the current Windows installation
+is a Client edition (ProductType=1) or a Server edition (ProductType other than 1).
+This is used to filter available UUP Dump builds to compatible OS types.
+
+.OUTPUTS
+String. Either 'Client' or 'Server', or 'Unknown' if detection fails.
+#>
 function Get-WindowsKind {
     try {
         $os = Get-CimInstance -Class Win32_OperatingSystem
@@ -780,6 +982,17 @@ function Get-WindowsKind {
 #----------------------------
 # Function to get current Windows language tag (e.g. en-US)
 #----------------------------
+<#
+.SYNOPSIS
+Retrieves the current system language tag(s).
+
+.DESCRIPTION
+Queries the Win32_OperatingSystem WMI class to get the system's configured language(s).
+Language tags are returned in lowercase (e.g., 'en-us', 'fr-fr') for easier matching with the UUP Dump API.
+
+.OUTPUTS
+String or array of strings representing the system language tags, or $null if detection fails.
+#>
 function Get-WindowsLanguageTag {
     try {
         $langList = Get-CimInstance -Class Win32_OperatingSystem | Select-Object -ExpandProperty MUILanguages
@@ -796,12 +1009,22 @@ function Get-WindowsLanguageTag {
 # ---------------------------
 # Editions map (lookup table)
 # ---------------------------
-# This function populates a global hashtable named $editions. Each entry is a small hashtable containing:
-# - K: a default product key that corresponds to the edition
-# - E: the internal EditionID used by Windows
-# - EName: the human-friendly name (used for display and matching)
-# - C: CompositionEditionID (some editions use this value)
-# The table is used to present a list to the user and to set registry values in 'forced' flows.
+<#
+.SYNOPSIS
+Populates the global editions lookup table.
+
+.DESCRIPTION
+Initializes the $editions global hashtable with Windows edition information.
+Each entry contains:
+- K: Default KMS/retail product key for the edition
+- E: Internal EditionID used by Windows
+- EName: Human-friendly edition name for display
+- C: CompositionEditionID (used by some editions)
+This table is used to present choices to the user and to set registry values during forced upgrades.
+
+.OUTPUTS
+None. Populates the global $editions variable.
+#>
 function Set-Editions {
     $global:editions = @{}
     $editions['1'] = @{K = 'YTMG3-N6DKC-DKB77-7M9GH-8HVX7'; E = 'Core'; EName = 'Windows 10 Home'; C = 'Core' }
@@ -836,15 +1059,39 @@ function Set-Editions {
 Set-Editions
 
 # Simple helper that pauses until the user presses Enter. Useful in interactive scripts so the user has time to read messages.
+<#
+.SYNOPSIS
+Pauses the script until the user presses Enter.
+
+.DESCRIPTION
+Displays a prompt "Press Enter to continue..." and blocks until the user presses Enter.
+Used to give the user time to read error messages or status information in interactive scripts.
+
+.OUTPUTS
+None.
+#>
 function Wait-Script { Read-Host -Prompt "Press Enter to continue..." > $null }
 
 # ---------------------------
 # Validation helpers
 # ---------------------------
-# Test-SetupExeValid: ensures the file exists, is signed with a Valid Authenticode signature,
-# and its FileDescription contains a known pattern indicating it is the Windows setup binary.
-# - Get-AuthenticodeSignature checks the digital signature on the executable (signer and status)
-# - FileDescription is fetched from the file's version information (helps avoid false positives)
+<#
+.SYNOPSIS
+Validates that a file is a genuine Windows setup.exe.
+
+.DESCRIPTION
+Performs strict validation of a setup.exe file:
+- Verifies the file exists
+- Checks the Authenticode digital signature (must be 'Valid')
+- Checks the FileDescription field matches known Windows setup patterns
+This defensive approach helps avoid accidentally launching untrusted setup binaries.
+
+.PARAMETER file
+Path to the file to validate.
+
+.OUTPUTS
+Boolean. Returns $true if the file passes all validation checks, $false otherwise.
+#>
 function Test-SetupExeValid {
     param([string]$file)
 
@@ -868,7 +1115,20 @@ function Test-SetupExeValid {
     return $false
 } 
 
-# Test-SourcesValid: checks whether the 'sources' directory contains at least one install.wim or install.esd file.
+<#
+.SYNOPSIS
+Validates that a sources directory contains Windows installation files.
+
+.DESCRIPTION
+Checks whether the specified directory contains at least one install.wim or install.esd file,
+which are required for Windows installation. Used to detect valid installation media.
+
+.PARAMETER dir
+Path to the directory to validate.
+
+.OUTPUTS
+Boolean. Returns $true if at least one install.wim or install.esd file is found, $false otherwise.
+#>
 function Test-SourcesValid {
     param([string]$dir)
     if (-not (Test-Path $dir -PathType Container)) { return $false }
@@ -876,7 +1136,23 @@ function Test-SourcesValid {
     return ($files.Count -gt 0)
 }
 
-# ConvertTo-SourcesPath: normalizes common user inputs into a consistent path format, e.g., 'E' -> 'E:\'
+<#
+.SYNOPSIS
+Normalizes a path string to a consistent format.
+
+.DESCRIPTION
+Converts user input paths into a standardized format:
+- Single drive letters (e.g., 'E') become 'E:\'
+- Drive letters with colon (e.g., 'E:') become 'E:\'
+- Paths without trailing backslash get one added
+This ensures consistent path handling regardless of how the user enters the path.
+
+.PARAMETER p
+The path string to normalize.
+
+.OUTPUTS
+String. The normalized path, or the original string if normalization fails.
+#>
 function ConvertTo-SourcesPath {
     param([string]$p)
     if ($null -eq $p -or ([string]::IsNullOrWhiteSpace($p))) { return $p }
@@ -894,10 +1170,24 @@ function ConvertTo-SourcesPath {
 # ---------------------------
 # Image listing helpers
 # ---------------------------
-# Get-ImagesFromSources: Search for install.wim/install.esd/install.swm inside the 'sources' directory.
-# - Preferred: use Get-WindowsImage (PowerShell cmdlet from Windows Image module) which returns structured objects.
-# - Fallback: call dism.exe /Get-WimInfo and parse its textual output when the module is not available.
-# The function returns an array of objects with ImageIndex, ImageName and File properties.
+<#
+.SYNOPSIS
+Retrieves the list of available Windows images from an installation source.
+
+.DESCRIPTION
+Searches for install.wim, install.esd, or install.swm files in the 'sources' subdirectory.
+For each file found, enumerates the contained images and returns their metadata.
+Prefers using Get-WindowsImage cmdlet (from Windows Image PowerShell module) when available;
+falls back to parsing DISM output for systems without the module.
+Returns an array of objects with ImageIndex, ImageName, and File properties.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'sources' directory).
+
+.OUTPUTS
+Array of PSCustomObjects with properties: ImageIndex (int), ImageName (string), File (string path).
+Returns empty array if no sources found.
+#>
 function Get-ImagesFromSources {
     param([string]$sourcesBase)
     if (-not $sourcesBase) { return @() }
@@ -934,7 +1224,20 @@ function Get-ImagesFromSources {
     return $results
 } 
 
-# Show-AvailableImages: helper to print the images in human-friendly format for the user.
+<#
+.SYNOPSIS
+Displays available Windows images to the user.
+
+.DESCRIPTION
+Retrieves the list of available images from the sources directory and displays them
+in a human-readable format with index, name, and source file information.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'sources' directory).
+
+.OUTPUTS
+None. Output is written to the console.
+#>
 function Show-AvailableImages {
     param([string]$sourcesBase)
     $images = Get-ImagesFromSources -sourcesBase $sourcesBase
@@ -943,8 +1246,20 @@ function Show-AvailableImages {
     foreach ($img in $images) { Write-Host "Index: $($img.ImageIndex) - $($img.ImageName)  [file: $($img.File)]" }
 }
 
-# Select-ImageFromSources: present the available images and let the user pick one by ImageIndex.
-# Returns the selected object or $null if canceled or invalid.
+<#
+.SYNOPSIS
+Prompts the user to select a Windows image from available sources.
+
+.DESCRIPTION
+Displays a list of available images with their indices and names, then prompts the user
+to select one by entering its ImageIndex. Returns the selected image object or $null if canceled.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'sources' directory).
+
+.OUTPUTS
+A PSCustomObject with ImageIndex, ImageName, and File properties. Returns $null if no image selected or not found.
+#>
 function Select-ImageFromSources {
     param([string]$sourcesBase)
     $images = Get-ImagesFromSources -sourcesBase $sourcesBase
@@ -964,12 +1279,24 @@ function Select-ImageFromSources {
 # ---------------------------
 # Edition detection helper
 # ---------------------------
-# Find-EditionByImageName attempts to map a human-readable image name (from the WIM/ESD) to one of the known editions
-# in our $editions table. It uses a few strategies, ordered from most to least strict:
-# 1) exact match (case-insensitive)
-# 2) keyword preference (server/datacenter/standard/home/education) — helps avoid mapping Server -> Home accidentally
-# 3) containment/token matching (less strict substrings)
-# The function returns the edition object (the same structure stored in $editions) or $null when no match is found.
+<#
+.SYNOPSIS
+Attempts to auto-detect a Windows edition from an image name.
+
+.DESCRIPTION
+Uses multiple strategies to map a WIM/ESD image name to a known edition:
+1. Exact match on the EName field (case-insensitive)
+2. Keyword preference (server, datacenter, standard, home, education) to avoid false matches
+3. Substring/token matching (less strict)
+Returns the edition object from the $editions table or $null if no match is found.
+This function helps avoid manual edition selection when auto-detection is reliable.
+
+.PARAMETER imageName
+The image name from the WIM/ESD file.
+
+.OUTPUTS
+Hashtable with edition information (K, E, EName, C properties), or $null if no match found.
+#>
 function Find-EditionByImageName {
     param([string]$imageName)
     if (-not $imageName) { return $null }
@@ -1005,6 +1332,23 @@ function Find-EditionByImageName {
     return $null
 } 
 
+<#
+.SYNOPSIS
+Allows the user to select an image and automatically detects its edition.
+
+.DESCRIPTION
+Guides the user through selecting a Windows image from the sources directory.
+Attempts to auto-detect the corresponding edition from the image name.
+If auto-detection fails, presents the full editions table for manual selection.
+Populates script-scoped variables with the selection: selectedImageIndex, selectedImageFile, selectedImageName,
+productkey, editionid, productname, and compositioneditionid.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'sources' directory).
+
+.OUTPUTS
+Boolean. Returns $true if selection succeeded, $false if selection was canceled or failed.
+#>
 function SelectImageAndAutoSetEdition {
     param([string]$sourcesBase)
     # Allow the user to pick an image from the sources and attempt to auto-select a matching edition.
@@ -1039,8 +1383,30 @@ function SelectImageAndAutoSetEdition {
     return $false
 } 
 
-# Set-Edition: records the chosen edition information into the script-global variables.
-# These values are used by other operations (for example, Start-Upgrade uses the product key).
+<#
+.SYNOPSIS
+Records the selected edition information globally.
+
+.DESCRIPTION
+Persists the chosen edition's information into script-scoped global variables
+for use by upgrade workflows. Sets productkey, editionid, productname, and compositioneditionid.
+Also displays the selection to the user and prompts them to press Enter.
+
+.PARAMETER Key
+The product key for the edition.
+
+.PARAMETER EditionID
+The internal EditionID (e.g., 'Professional', 'Enterprise').
+
+.PARAMETER ProductName
+The human-friendly product name (e.g., 'Windows 10 Pro').
+
+.PARAMETER CompositionEditionID
+The CompositionEditionID value (used by some editions).
+
+.OUTPUTS
+None. Sets global variables and displays confirmation to the user.
+#>
 function Set-Edition {
     param($Key, $EditionID, $ProductName, $CompositionEditionID)
     # Persist the chosen edition information into script-scoped globals so other flows (Start-Upgrade, Start-ForcedUpgrade)
@@ -1053,7 +1419,18 @@ function Set-Edition {
     Wait-Script
 } 
 
-# The requested actions (keep semantics identical to original)
+<#
+.SYNOPSIS
+Launches Windows setup in standard mode.
+
+.DESCRIPTION
+Starts setup.exe with minimal switches, allowing the user to proceed interactively.
+Setup will automatically detect and use the appropriate image and edition from the sources.
+This is the simplest upgrade path for end users.
+
+.OUTPUTS
+None. Launches setup.exe and then calls Exit, terminating the script.
+#>
 function Start-BoringUpgrade {
     # Launch setup.exe in the simplest, user-driven mode. We pass a few recommended switches:
     # - /eula accept : automatically accept the EULA to avoid an interactive prompt.
@@ -1067,6 +1444,18 @@ function Start-BoringUpgrade {
     Exit
 } 
 
+<#
+.SYNOPSIS
+Launches Windows setup with a pre-installation product key.
+
+.DESCRIPTION
+Starts setup.exe with the selected product key passed via the /pkey switch.
+If a specific image index was selected by the user, passes it via /imageindex to ensure
+the desired image is used. This allows forcing upgrade to a specific edition.
+
+.OUTPUTS
+None. Launches setup.exe and then calls Exit, terminating the script.
+#>
 function Start-Upgrade {
     # Launch setup with a pre-installation product key to force upgrade into the selected edition.
     # Note: passing /pkey makes Setup apply the provided key during the install; ensure the chosen key
@@ -1088,6 +1477,21 @@ function Start-Upgrade {
     Exit
 }
 
+<#
+.SYNOPSIS
+Performs a forced upgrade by modifying the registry before launching setup.
+
+.DESCRIPTION
+WARNING: This is a dangerous operation. Writes EditionID, ProductName, and CompositionEditionID
+into HKLM to trick Windows Setup into thinking another edition is installed.
+Setup will upgrade to the selected edition, bypassing checks that would normally prevent
+downgrades or unsupported edition changes.
+Only use this for testing or automation when you fully understand the consequences.
+Requires explicit user confirmation before proceeding.
+
+.OUTPUTS
+None. Modifies registry, launches setup.exe, and then calls Exit, terminating the script.
+#>
 function Start-ForcedUpgrade {
     # Forced upgrade is dangerous: it writes EditionID/ProductName into HKLM to trick Setup into thinking
     # another edition is installed. Only use this when you understand the consequences (testing/automation scenarios).
@@ -1116,6 +1520,18 @@ function Start-ForcedUpgrade {
     Exit
 } 
 
+<#
+.SYNOPSIS
+Changes the Windows product key on the running system.
+
+.DESCRIPTION
+Uses slmgr.vbs to install a new product key on the running system.
+This does not start setup; it only configures the key the current OS will use for activation.
+Requires administrator privileges. The operation is performed non-interactively via cscript.exe.
+
+.OUTPUTS
+None. Executes slmgr and displays status to the user.
+#>
 function Set-ProductKey {
     # Change the product key on the running system using slmgr (scripted via cscript). This operation does not
     # start setup; it only sets the key the running system will use for activation. It requires administrative rights.
@@ -1134,11 +1550,27 @@ function Set-ProductKey {
 # ---------------------------
 # ADPrep helpers
 # ---------------------------
-# These functions run Active Directory preparation utilities shipped in the Windows sources under
-# `support\adprep\adprep.exe`. They expect the installation media path to be set in $script:sourcesPath.
-# Warning: running adprep /forestprep and /domainprep affects your AD schema and domain — only run this with
-# proper planning and on the correct server roles (schema master / enterprise admin privileges required).
+<#
+.SYNOPSIS
+Runs the Active Directory forest preparation utility.
 
+.DESCRIPTION
+Executes adprep /forestprep from the Windows installation sources.
+This updates the Active Directory schema to support a new Windows version.
+WARNING: High-impact operation that affects the entire AD forest.
+Must be run on the Schema Master with Enterprise Admin privileges.
+Requires explicit user confirmation before proceeding.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'support\adprep' directory).
+Defaults to $script:sourcesPath if not provided.
+
+.OUTPUTS
+None. Executes adprep and displays status to the user.
+
+.NOTES
+ADPrep operations should only be run as part of a planned Windows upgrade with proper testing.
+#>
 function Start-ADPrepForestPrep {
     param([string]$sourcesBase)
 
@@ -1172,6 +1604,26 @@ function Start-ADPrepForestPrep {
     Wait-Script
 } 
 
+<#
+.SYNOPSIS
+Runs the Active Directory domain preparation utility.
+
+.DESCRIPTION
+Executes adprep /domainprep from the Windows installation sources.
+This updates the domain configuration to support a new Windows version.
+Should be run after /forestprep completes. Typically requires Domain Admin privileges.
+Requires explicit user confirmation before proceeding.
+
+.PARAMETER sourcesBase
+Base path to the installation source (the parent of the 'support\adprep' directory).
+Defaults to $script:sourcesPath if not provided.
+
+.OUTPUTS
+None. Executes adprep and displays status to the user.
+
+.NOTES
+ADPrep operations should only be run as part of a planned Windows upgrade with proper testing.
+#>
 function Start-ADPrepDomainPrep {
     param([string]$sourcesBase)
 
@@ -1200,7 +1652,28 @@ function Start-ADPrepDomainPrep {
     Wait-Script
 }
 
-# Sources selection helper (manual or scan). When $initialChoice passed, inner prompt is suppressed to avoid double display.
+<#
+.SYNOPSIS
+Interactive menu for source path selection and ISO building.
+
+.DESCRIPTION
+Guides the user through selecting an installation source via three methods:
+1. Manual path entry: User provides a path directly
+2. Drive scanning: Script scans local drives for setup.exe or sources folder
+3. UUP Dump: Downloads and converts a Windows build into ISO, then mounts it
+After selection, optionally displays available images in the sources.
+Populates $script:sourcesPath with the selected path.
+
+.PARAMETER initialChoice
+Optional. If provided, skips the initial menu and uses this choice ('1', '2', or '3').
+Useful for chaining from other menus.
+
+.PARAMETER showImages
+Optional. Boolean. If $true (default), displays available images after path selection.
+
+.OUTPUTS
+None. Sets $script:sourcesPath and displays information to the user.
+#>
 function Set-SourcesPathInteractive {
     param([string]$initialChoice, [bool]$showImages = $true)
 
@@ -1246,7 +1719,7 @@ function Set-SourcesPathInteractive {
             }
             Write-Host "No valid setup.exe or 'sources' folder found in $resolved" -ForegroundColor Yellow
             $confirm = Read-Host -Prompt "Set this path anyway? (y/N)"
-            if ($confirm -match '^[Yy]') { $script:sourcesPath = Normalize-SourcesPath $resolved; if ($showImages) { Show-AvailableImages -sourcesBase $script:sourcesPath }; Wait-Script; return } else { Wait-Script; return }
+            if ($confirm -match '^[Yy]') { $script:sourcesPath = ConvertTo-SourcesPath $resolved; if ($showImages) { Show-AvailableImages -sourcesBase $script:sourcesPath }; Wait-Script; return } else { Wait-Script; return }
         }
         '2' {
             Write-Host "Scanning drives..." -ForegroundColor Cyan
@@ -1339,70 +1812,343 @@ function Set-SourcesPathInteractive {
     }
 }
 
-# Main guided flow
-while ($true) {
-    Clear-Host
-    Write-Host "In-Place Upgrade (guided)" -ForegroundColor Cyan
-    Write-Host "Choose source:" -ForegroundColor Cyan
-    Write-Host "1) Enter a path manually"
-    Write-Host "2) Scan drives to find media (validated)"
-    Write-Host "3) Create an ISO from UUP Dump (download & convert)`n"
-    Write-Host "0) exit`n"
-    $choice = Read-Host -Prompt 'Please make a selection (1/2/3/0)'
-    $choice = if ($null -ne $choice) { $choice.Trim() } else { '' }
-    switch ($choice) {
-        '0' { Write-Host "Exiting." -ForegroundColor Cyan; Exit }
-        '1' {
-            Set-SourcesPathInteractive '1' $false
-            if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) { Write-Host "Sources not set." -ForegroundColor Yellow; Wait-Script; continue }
-            if (-not (SelectImageAndAutoSetEdition -sourcesBase $script:sourcesPath)) { continue }
-            # Show method menu
-        }
-        '2' {
-            Set-SourcesPathInteractive '2' $false
-            if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) { Write-Host "Sources not set." -ForegroundColor Yellow; Wait-Script; continue }
-            if (-not (SelectImageAndAutoSetEdition -sourcesBase $script:sourcesPath)) { continue }
-        }
-        '3' {
-            Set-SourcesPathInteractive '3' $false
-            if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) { Write-Host "Sources not set." -ForegroundColor Yellow; Wait-Script; continue }
-            if (-not (SelectImageAndAutoSetEdition -sourcesBase $script:sourcesPath)) { continue }
-        }
-        default { Write-Host "Invalid selection." -ForegroundColor Yellow; Wait-Script; continue }
+# ---------------------------
+# Reusable Menu System
+# ---------------------------
+<#
+.SYNOPSIS
+Displays a formatted menu and returns the user's selection.
+
+.DESCRIPTION
+This is a generic, reusable menu function that displays a title, a list of options, and
+prompts the user for a selection. The function handles validation and returns the selected
+option key. This function is the core of the new SConfig-like interface.
+
+.PARAMETER Title
+The menu title displayed at the top.
+
+.PARAMETER Options
+A hashtable where keys are option identifiers (e.g., '1', 'a', 's') and values are option descriptions.
+Example: @{'1'='Option One'; '2'='Option Two'; 'q'='Quit'}
+
+.PARAMETER AllowedOptions
+An array of allowed option keys. If omitted, derived from Options keys.
+
+.PARAMETER Prompt
+The text to display when asking for user input. Defaults to a sensible message.
+
+.OUTPUTS
+The user's selected option key as a string (e.g., '1' or 'q').
+
+.EXAMPLE
+$opts = @{
+    '1' = 'First choice'
+    '2' = 'Second choice'
+    'q' = 'Quit'
+}
+$choice = Show-MenuPrompt -Title "Main Menu" -Options $opts
+#>
+function Show-MenuPrompt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Options,
+
+        [string[]]$AllowedOptions,
+
+        [string]$Prompt = 'Select an option'
+    )
+
+    # If AllowedOptions is not provided, derive from the Options keys
+    if (-not $AllowedOptions -or $AllowedOptions.Count -eq 0) {
+        $AllowedOptions = @($Options.Keys | Sort-Object)
     }
 
-    # Methods menu after image & edition selected
     while ($true) {
         Clear-Host
-        Write-Host "Sources: $($script:sourcesPath)" -ForegroundColor Cyan
-        Write-Host "Selected edition: $($script:productname)" -ForegroundColor Green
-        Write-Host "Choose action:"
-        # Actions explained :
-        # k) Set-ProductKey: change the product key on the running system using slmgr (does not start setup)
-        # s) Start setup (standard): launch setup.exe and let it choose the image/edition automatically
-        # u) Start setup (pre-install key): run setup.exe and pass the pre-installation product key (and /imageindex when selected)
-        # f) Forced upgrade: write EditionID/ProductName into HKLM before launching setup (dangerous, advanced)
-        # r) Run adprep /forestprep: execute the forest preparation utility from the sources (if present)
-        # d) Run adprep /domainprep: execute the domain preparation utility from the sources
-        # b) Back: return to the top-level menu to choose a different source or exit
-        Write-Host "k) Change product key via slmgr (Set-ProductKey)"
-        Write-Host "s) Start setup (standard mode)"
-        Write-Host "u) Start setup choosen edition with pre-installation key"
-        Write-Host "f) Forced upgrade (registry modification + setup)"
-        Write-Host "r) Run adprep /forestprep (from support\adprep\adprep.exe under sources)"
-        Write-Host "d) Run adprep /domainprep (from support\adprep\adprep.exe under sources)"
-        Write-Host "b) Back to top menu"
-        # Update prompt to include the new options (r = forestprep, d = domainprep)
-        $m = Read-Host -Prompt 'Select action (k/s/u/f/r/d/b)'
-        switch ($m.ToLower()) {
-            'k' { Set-ProductKey; continue }
-            's' { Start-BoringUpgrade }
-            'u' { Start-Upgrade }
-            'f' { Start-ForcedUpgrade }
-            'r' { Start-ADPrepForestPrep -sourcesBase $script:sourcesPath; continue }
-            'd' { Start-ADPrepDomainPrep -sourcesBase $script:sourcesPath; continue }
-            'b' { break 2 } # break out of switch AND the methods while loop to return to top-level menu
-            default { Write-Host "Unknown action." -ForegroundColor Yellow; Wait-Script; continue }
+        # Only display the title if it is not empty
+        if (-not [string]::IsNullOrWhiteSpace($Title)) {
+            Write-Host $Title -ForegroundColor Cyan
+            Write-Host ''
+        }
+
+        # Display each option on its own line
+        foreach ($key in $AllowedOptions) {
+            if ($Options.ContainsKey($key)) {
+                Write-Host "$key) $($Options[$key])"
+            }
+        }
+
+        Write-Host ''
+        $selection = Read-Host -Prompt $Prompt
+
+        # Validate: the selection must be a key in AllowedOptions
+        if ($AllowedOptions -contains $selection) {
+            return $selection
+        }
+
+        # Invalid selection; show error and loop to prompt again
+        Write-Host "Invalid selection. Please try again." -ForegroundColor Red
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+# ---------------------------
+# Menu Flow: Source Selection
+# ---------------------------
+<#
+.SYNOPSIS
+Main menu: prompts the user to select an installation source.
+
+.DESCRIPTION
+This is the first-level menu (SConfig-style). It offers four options:
+1. Enter a path manually
+2. Scan drives to find media
+3. Build a new ISO installation media, mount it, and use it
+4. Exit
+
+After a source is selected and validated, the user proceeds to image/edition selection.
+#>
+function Show-MainSourceMenu {
+    $menuOptions = @{
+        '1' = 'Enter a path manually'
+        '2' = 'Scan drives to find media'
+        '3' = 'Build a new ISO installation media, mount it and use it'
+        '0' = 'Exit'
+    }
+
+    while ($true) {
+        $choice = Show-MenuPrompt -Title 'Select the installation source' -Options $menuOptions -AllowedOptions @('1', '2', '3', '0')
+
+        switch ($choice) {
+            '0' {
+                Clear-Host
+                Write-Host 'Exiting.' -ForegroundColor Cyan
+                Exit 0
+            }
+            '1' {
+                Set-SourcesPathInteractive '1' $false
+                if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) {
+                    Write-Host 'Sources not set.' -ForegroundColor Yellow
+                    Wait-Script
+                    continue
+                }
+                return
+            }
+            '2' {
+                Set-SourcesPathInteractive '2' $false
+                if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) {
+                    Write-Host 'Sources not set.' -ForegroundColor Yellow
+                    Wait-Script
+                    continue
+                }
+                return
+            }
+            '3' {
+                Set-SourcesPathInteractive '3' $false
+                if ([string]::IsNullOrWhiteSpace($script:sourcesPath)) {
+                    Write-Host 'Sources not set.' -ForegroundColor Yellow
+                    Wait-Script
+                    continue
+                }
+                return
+            }
+            default {
+                Write-Host 'Unexpected error in menu selection.' -ForegroundColor Red
+                Wait-Script
+            }
         }
     }
 }
+
+# ---------------------------
+# Menu Flow: Image Selection
+# ---------------------------
+<#
+.SYNOPSIS
+Displays available images and allows the user to select one.
+
+.DESCRIPTION
+This function retrieves the list of available images from the sources directory,
+presents them to the user for selection, and attempts to auto-detect the corresponding edition.
+If auto-detection fails, the user is prompted to select from the editions table manually.
+
+After a successful selection, the function populates script-scoped globals:
+- $script:selectedImageIndex
+- $script:selectedImageFile
+- $script:selectedImageName
+- $script:productkey
+- $script:editionid
+- $script:productname
+- $script:compositioneditionid
+#>
+function Show-ImageSelectionMenu {
+    if (-not (SelectImageAndAutoSetEdition -sourcesBase $script:sourcesPath)) {
+        Write-Host 'Image and edition selection failed. Returning to source menu.' -ForegroundColor Yellow
+        Wait-Script
+        return $false
+    }
+    return $true
+}
+
+# ---------------------------
+# Menu Flow: Installation Method (Main)
+# ---------------------------
+<#
+.SYNOPSIS
+Main installation method menu after image/edition have been selected.
+
+.DESCRIPTION
+Displays the installation methods and utilities submenu. Options include:
+- Start setup (standard): launch setup.exe with default settings
+- Start setup (pre-install key): pass the pre-installation product key
+- Forced upgrade: modify registry before launching setup (dangerous)
+- Utilities: sub-menu with adprep and key management options
+- Back: return to source selection menu
+
+This menu loops until the user exits or returns to the source menu.
+#>
+function Show-InstallationMethodMenu {
+    while ($true) {
+        $menuOptions = @{
+            '1' = 'Start setup (standard): launch setup.exe and let it choose the image/edition automatically'
+            '2' = 'Start setup (pre-install key): run setup.exe and pass the pre-installation product key and the image edition selected'
+            '3' = 'Forced upgrade: write EditionID/ProductName into HKLM before launching setup (dangerous, advanced)'
+            '4' = 'Utilities'
+            '0' = 'Back'
+        }
+
+        Clear-Host
+        Write-Host 'Installation Setup' -ForegroundColor Cyan
+        Write-Host "Sources: $($script:sourcesPath)" -ForegroundColor Green
+        Write-Host "Selected edition: $($script:productname)" -ForegroundColor Green
+        Write-Host ''
+
+        $choice = Show-MenuPrompt -Title '' -Options $menuOptions -AllowedOptions @('1', '2', '3', '4', '0')
+
+        switch ($choice) {
+            '1' {
+                Start-BoringUpgrade
+                # Note: Start-BoringUpgrade calls Exit internally
+            }
+            '2' {
+                Start-Upgrade
+                # Note: Start-Upgrade calls Exit internally
+            }
+            '3' {
+                Start-ForcedUpgrade
+                # Note: Start-ForcedUpgrade calls Exit internally
+            }
+            '4' {
+                Show-UtilitiesMenu
+                # After utilities menu exits, loop back to this menu
+                continue
+            }
+            '0' {
+                # Return to source selection menu
+                return
+            }
+            default {
+                Write-Host 'Unexpected error in menu selection.' -ForegroundColor Red
+                Wait-Script
+            }
+        }
+    }
+}
+
+# ---------------------------
+# Menu Flow: Utilities Submenu
+# ---------------------------
+<#
+.SYNOPSIS
+Utilities submenu for advanced operations.
+
+.DESCRIPTION
+This submenu offers:
+- Set-ProductKey: change the product key on the running system using slmgr
+- Run adprep /forestprep: execute the forest preparation utility from the sources
+- Run adprep /domainprep: execute the domain preparation utility from the sources
+- Back: return to the installation method menu
+
+These utilities are provided for administrative workflows and should be used with caution.
+#>
+function Show-UtilitiesMenu {
+    while ($true) {
+        $menuOptions = @{
+            '1' = 'Set-ProductKey: change the product key on the running system using slmgr'
+            '2' = 'Run adprep /forestprep: execute the forest preparation utility from the sources'
+            '3' = 'Run adprep /domainprep: execute the domain preparation utility from the sources'
+            '0' = 'Back'
+        }
+
+        Clear-Host
+        Write-Host 'Utilities' -ForegroundColor Cyan
+        Write-Host "Sources: $($script:sourcesPath)" -ForegroundColor Green
+        Write-Host ''
+
+        $choice = Show-MenuPrompt -Title '' -Options $menuOptions -AllowedOptions @('1', '2', '3', '0')
+
+        switch ($choice) {
+            '1' {
+                Set-ProductKey
+                continue
+            }
+            '2' {
+                Start-ADPrepForestPrep -sourcesBase $script:sourcesPath
+                continue
+            }
+            '3' {
+                Start-ADPrepDomainPrep -sourcesBase $script:sourcesPath
+                continue
+            }
+            '0' {
+                # Return to the installation method menu
+                return
+            }
+            default {
+                Write-Host 'Unexpected error in menu selection.' -ForegroundColor Red
+                Wait-Script
+            }
+        }
+    }
+}
+
+# ---------------------------
+# Main Application Flow
+# ---------------------------
+<#
+.SYNOPSIS
+Entry point for the interactive guided upgrade workflow.
+
+.DESCRIPTION
+This function implements the top-level flow of the application. It orchestrates:
+1. Source selection (Show-MainSourceMenu)
+2. Image and edition selection (Show-ImageSelectionMenu)
+3. Installation method choice (Show-InstallationMethodMenu)
+
+The flow loops so the user can select a new source and start over without restarting the script.
+#>
+function Start-InteractiveWorkflow {
+    while ($true) {
+        # Step 1: Source selection
+        Show-MainSourceMenu
+        # sourcesPath is now set
+
+        # Step 2: Image and edition selection
+        if (-not (Show-ImageSelectionMenu)) {
+            # If image selection failed, return to source menu
+            continue
+        }
+
+        # Step 3: Installation method and utilities
+        Show-InstallationMethodMenu
+        # After returning from installation menu, loop to source selection
+    }
+}
+
+# Start the main interactive workflow
+Start-InteractiveWorkflow
